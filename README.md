@@ -21,6 +21,33 @@ For production-grade intelligence, the system utilizes an API key to parse the r
 - **Resolution:** The AI maps facts across documents and explicitly highlights mismatches with confidence scores, returning strict JSON directly to the frontend interface.
 - **Cost:** Costs fractions of a penny per crawled page via Anthropic's API pricing.
 
+### Engine 3: Ollama Local LLM (Self-Hosted)
+When enabled, Ollama uses the same semantic extraction pipeline as Anthropic but runs entirely on your machine.
+- **How it works:** The backend sends cleaned text chunks to your local Ollama model through `http://localhost:11434/api/generate`.
+- **Resolution:** The model returns structured JSON with canonical values and per-target conflicts.
+- **Cost:** $0 API spend after model download (local compute only).
+
+---
+
+## 🎯 Matching & Severity Rules
+
+All engines compare each target page against the canonical source and classify differences with the same intent:
+
+- **Exact Match:** Same normalized value. Not flagged as a conflict.
+- **Fuzzy Match (Low Severity):** Minor spelling/title/format variants (for example `Sarah` vs `Sara`, `Sarah` vs `Sarah C`).
+- **Mismatch (High Severity):** Clearly different values (for example `Sarah` vs `Dan`).
+
+### Local Heuristic Engine
+- Uses Regex extraction plus `string-similarity`.
+- Applies normalization before comparison (case/punctuation/title cleanup).
+- Emits conflict-level fields: `type`, `severity`, `confidence`, `snippet`.
+- Field severity is escalated to `high` if any conflict is a `mismatch`; otherwise it remains `low` for fuzzy-only conflicts.
+
+### Anthropic / Ollama Engines
+- Prompt enforces strict JSON output and requires explicit conflict classification.
+- Backend post-processes model output to normalize shape and apply fallback classification if type/severity is missing.
+- This keeps typo/variant handling consistent with local heuristics and prevents model-format drift from breaking UI interpretation.
+
 ---
 
 ## 🛡️ Polite Crawling & Safety (DDoS Protection)
@@ -76,14 +103,56 @@ To unlock the semantic comparison engine and disable the local heuristics fallba
 
 ---
 
+## 🧠 Local AI with Ollama (No API Costs)
+
+You can now run the semantic comparison engine locally through Ollama.
+
+1. **Install Ollama**
+   ```bash
+   brew install ollama
+   ```
+
+2. **Start the Ollama service**
+   ```bash
+   ollama serve
+   ```
+
+3. **Pull a local model (in a new terminal)**
+   ```bash
+   ollama pull llama3.1:8b-instruct-q4_K_M
+   ```
+
+4. **Configure backend env**
+   ```bash
+   cd server
+   cp .env.example .env
+   ```
+   Then set:
+   ```env
+   OLLAMA_ENABLED=true
+   OLLAMA_BASE_URL=http://localhost:11434
+   OLLAMA_MODEL=llama3.1:8b-instruct-q4_K_M
+   ```
+
+5. **Restart backend**
+   ```bash
+   cd server
+   node index.js
+   ```
+
+When enabled, the API response includes `engine_used` like `Ollama_<model>`.
+You can also verify setup health from:
+- Backend: `GET http://localhost:3000/api/health`
+- Frontend: **AI Model Health & Setup** panel (includes Anthropic configured/used and Ollama connectivity/model status)
+
+---
+
 ## 🔮 Future Improvements Roadmap
 
 The architecture is built to easily support the following future upgrades:
 
-1. **Self-Hosted Open Source LLM Support (On-Premises AI)**
-   Instead of using Anthropic's cloud APIs, the backend can easily be adapted to query local models running on your own hardware via **Ollama** or **vLLM**. 
-   - *Why do this?* It gives you 100% data privacy and 0 API costs. 
-   - *Models to use:* `Llama-3-8B-Instruct` or `Mistral-7B` are highly capable of the JSON fact-extraction required by this app, and can run natively on a standard Macbook or PC with a decent GPU. We would just change the Axios request in `server/index.js` to point to `http://localhost:11434/api/generate`.
+1. **vLLM Integration (Alternative Local Inference Runtime)**
+   - Add drop-in support for vLLM endpoints as an alternative to Ollama for higher throughput or multi-GPU setups.
 
 2. **Puppeteer / Playwright Integration**
    - The current backend uses `axios` and `cheerio`. This is incredibly fast but cannot render Single Page Applications (SPAs) built with modern frameworks. Upgrading the crawler to spawn headless browsers would allow extraction from Javascript-heavy university portals.

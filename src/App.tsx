@@ -29,6 +29,40 @@ export default function App() {
   const [rawDataResult, setRawDataResult] = useState<any[]>([]);
   const [errorMsg, setErrorMsg] = useState("");
   const [engineUsed, setEngineUsed] = useState("");
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthError, setHealthError] = useState("");
+  const [aiHealth, setAiHealth] = useState<any>(null);
+
+  const engineLabel = (engine: string) => {
+    if (!engine) return "Unknown";
+    if (engine === 'Anthropic_Claude') return 'Claude AI';
+    if (engine.startsWith('Ollama_')) return `Ollama (${engine.replace('Ollama_', '')})`;
+    if (engine === 'Local_Regex_Heuristic') return 'Local Heuristics';
+    return engine;
+  };
+
+  const loadHealth = async () => {
+    setHealthLoading(true);
+    setHealthError("");
+    try {
+      const resp = await fetch('http://localhost:3000/api/health');
+      const data = await resp.json();
+      if (!resp.ok) {
+        setHealthError(data.error || 'Failed to load AI health.');
+        return;
+      }
+      setAiHealth(data);
+    } catch (err: any) {
+      setHealthError("Cannot reach backend health endpoint on port 3000.");
+      console.error(err);
+    } finally {
+      setHealthLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadHealth();
+  }, []);
 
   const startScan = async () => {
     if (!canonicalUrl || !targetUrls) return;
@@ -70,9 +104,10 @@ export default function App() {
       setResultsData(data.results);
       setRawDataResult(data.raw_data);
       setEngineUsed(data.engine_used);
+      loadHealth();
       setCurrentStep(4);
       setPipelineState('completed');
-      setLogs(prev => [...prev, `[${new Date().toISOString().split('T')[1].slice(0, 8)}] Scan complete using ${data.engine_used === 'Anthropic_Claude' ? 'Claude 3.5 Sonnet LLM' : 'Free Local Regex Heuristics'}.`]);
+      setLogs(prev => [...prev, `[${new Date().toISOString().split('T')[1].slice(0, 8)}] Scan complete using ${engineLabel(data.engine_used)}.`]);
 
     } catch (err: any) {
       clearInterval(logInterval);
@@ -100,6 +135,72 @@ export default function App() {
       default: return <span className="badge">Unknown</span>;
     }
   };
+
+  const statusBadge = (ok: boolean, textTrue = "Ready", textFalse = "Not Ready") => (
+    <span className={ok ? "badge badge-low" : "badge badge-critical"}>
+      {ok ? textTrue : textFalse}
+    </span>
+  );
+
+  const renderHealthPanel = () => (
+    <div className="glass-card" style={{ padding: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', marginBottom: '1rem' }}>
+        <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Cpu size={20} className="logo-icon" style={{ background: 'transparent' }} />
+          AI Model Health & Setup
+        </h3>
+        <button className="btn btn-secondary" onClick={loadHealth} disabled={healthLoading}>
+          <RefreshCw size={14} />
+          {healthLoading ? 'Checking...' : 'Refresh Health'}
+        </button>
+      </div>
+
+      {healthError && (
+        <div style={{ marginBottom: '1rem', color: 'var(--status-critical)', fontSize: '0.9rem' }}>
+          {healthError}
+        </div>
+      )}
+
+      {!aiHealth && !healthError ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Loading AI health...</div>
+      ) : (
+        <div style={{ display: 'grid', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', padding: '0.75rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+            <div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Selected Engine (Next Scan)</div>
+              <div style={{ fontWeight: 600 }}>{engineLabel(aiHealth?.selected_engine || '')}</div>
+            </div>
+            {statusBadge(Boolean(aiHealth?.selected_engine), "Resolved", "Unknown")}
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', padding: '0.75rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+            <div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Anthropic</div>
+              <div style={{ fontSize: '0.9rem' }}>
+                Configured: <strong>{aiHealth?.anthropic?.configured ? 'Yes' : 'No'}</strong> | Being Used: <strong>{aiHealth?.anthropic?.being_used ? 'Yes' : 'No'}</strong>
+              </div>
+            </div>
+            {statusBadge(Boolean(aiHealth?.anthropic?.configured), "Configured", "Missing Key")}
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', padding: '0.75rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+            <div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Ollama</div>
+              <div style={{ fontSize: '0.9rem' }}>
+                Enabled: <strong>{aiHealth?.ollama?.enabled ? 'Yes' : 'No'}</strong> | Reachable: <strong>{aiHealth?.ollama?.reachable ? 'Yes' : 'No'}</strong> | Model Installed: <strong>{aiHealth?.ollama?.model_installed ? 'Yes' : 'No'}</strong>
+              </div>
+              {aiHealth?.ollama?.error && <div style={{ color: 'var(--status-medium)', fontSize: '0.8rem', marginTop: '0.25rem' }}>{aiHealth.ollama.error}</div>}
+            </div>
+            {statusBadge(Boolean(aiHealth?.ollama?.enabled && aiHealth?.ollama?.reachable && aiHealth?.ollama?.model_installed), "Ready", "Setup Needed")}
+          </div>
+
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            Last scan engine used: <strong style={{ color: 'var(--text-primary)' }}>{engineLabel(aiHealth?.last_engine_used || '')}</strong>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="app-container">
@@ -179,6 +280,7 @@ export default function App() {
                 />
               </div>
             </div>
+            {renderHealthPanel()}
 
             {pipelineState === 'running' && (
               <div className="glass-card animate-fade-in" style={{ marginTop: '2rem' }}>
@@ -229,8 +331,8 @@ export default function App() {
                 <h1 className="page-title" style={{ fontSize: '2rem' }}>Audit Overview</h1>
                 <p className="page-subtitle" style={{ marginBottom: 0 }}>
                   Successfully completed real-time network evaluation.
-                  <span className={engineUsed === 'Anthropic_Claude' ? "badge badge-low" : "badge badge-medium"} style={{ marginLeft: '1rem' }}>
-                    {engineUsed === 'Anthropic_Claude' ? "Powered by Claude AI" : "Powered by Free Local Heuristics"}
+                  <span className={engineUsed === 'Anthropic_Claude' || engineUsed.startsWith('Ollama_') ? "badge badge-low" : "badge badge-medium"} style={{ marginLeft: '1rem' }}>
+                    {`Powered by ${engineLabel(engineUsed)}`}
                   </span>
                 </p>
               </div>
@@ -257,7 +359,13 @@ export default function App() {
                 <span className="stat-label">Total URLs Scraped</span>
                 <span className="stat-value">{rawDataResult.length} <span style={{ fontSize: '1rem', color: 'var(--text-muted)', fontWeight: 400 }}>domains</span></span>
               </div>
+              <div className="glass-card stat-card" style={{ borderTop: '3px solid var(--status-low)' }}>
+                <span className="stat-label">Engine Used</span>
+                <span className="stat-value" style={{ fontSize: '1.3rem' }}>{engineLabel(engineUsed)}</span>
+              </div>
             </div>
+
+            {renderHealthPanel()}
 
             <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
               {activeTab === 'structured' && (
