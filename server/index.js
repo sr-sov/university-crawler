@@ -17,6 +17,7 @@ const anthropic = new Anthropic({
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1:8b-instruct-q4_K_M';
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 300000);
 const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022';
 let lastEngineUsed = 'none';
 
@@ -54,9 +55,104 @@ function buildPrompt(canonicalUrl, canonicalData, targetsData, fields) {
     return promptText;
 }
 
+function toFieldKey(field) {
+    return String(field || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function inferFieldType(field) {
+    const value = String(field || '').toLowerCase();
+    if (value.includes('year') || value.includes('date') || value.includes('deadline') || value.includes('term')) return 'date';
+    if (value.includes('phone') || value.includes('contact') || value.includes('email') || value.includes('address')) return 'contact';
+    return 'entity';
+}
+
 function parseResultsFromModelOutput(outputText) {
     const jsonStr = outputText.substring(outputText.indexOf('{'), outputText.lastIndexOf('}') + 1);
     return JSON.parse(jsonStr).results || {};
+}
+
+function flattenCanonicalSnapshot(snapshot) {
+    const normalized = snapshot?.data && typeof snapshot.data === 'object' ? snapshot.data : snapshot;
+    const lines = [];
+
+    if (!normalized || typeof normalized !== 'object') {
+        return { extractedText: '', derivedFields: [], metadata: {} };
+    }
+
+    const content = normalized.content || {};
+    const crawler = normalized.crawler || {};
+
+    if (normalized.title) lines.push(`Title: ${normalized.title}`);
+    if (normalized.subtitle) lines.push(`Subtitle: ${normalized.subtitle}`);
+
+    const highlights = Array.isArray(content.highlights) ? content.highlights : [];
+    if (highlights.length > 0) {
+        lines.push('Highlights:');
+        highlights.forEach((item) => lines.push(`- ${item}`));
+    }
+
+    const sections = Array.isArray(content.sections) ? content.sections : [];
+    sections.forEach((section) => {
+        if (section.heading) lines.push(`Section: ${section.heading}`);
+        if (section.summary) lines.push(`Summary: ${section.summary}`);
+        const items = Array.isArray(section.items) ? section.items : [];
+        items.forEach((item) => lines.push(`- ${item}`));
+    });
+
+    const announcements = Array.isArray(content.announcements) ? content.announcements : [];
+    announcements.forEach((entry) => {
+        if (entry?.label && entry?.value) lines.push(`${entry.label}: ${entry.value}`);
+    });
+
+    const contacts = Array.isArray(content.contacts) ? content.contacts : [];
+    contacts.forEach((entry) => {
+        if (entry?.label && entry?.value) lines.push(`${entry.label}: ${entry.value}`);
+    });
+
+    const sourceUrls = Array.isArray(crawler.sourceUrls) ? crawler.sourceUrls : [];
+    if (sourceUrls.length > 0) {
+        lines.push('Canonical Source URLs:');
+        sourceUrls.forEach((url) => lines.push(`- ${url}`));
+    }
+    if (crawler.notes) lines.push(`Crawler Notes: ${crawler.notes}`);
+
+    const fieldSet = new Set();
+    const collectLabel = (value) => {
+        const text = String(value || '').trim();
+        if (!text) return;
+        if (text.includes(':')) {
+            const [label] = text.split(':');
+            if (label && label.length > 2) fieldSet.add(label.trim());
+        }
+    };
+
+    sections.forEach((section) => {
+        const items = Array.isArray(section.items) ? section.items : [];
+        items.forEach(collectLabel);
+    });
+    announcements.forEach((entry) => {
+        if (entry?.label) fieldSet.add(String(entry.label).trim());
+    });
+    contacts.forEach((entry) => {
+        if (entry?.label) fieldSet.add(String(entry.label).trim());
+    });
+
+    return {
+        extractedText: lines.join('\n'),
+        derivedFields: Array.from(fieldSet).filter(Boolean),
+        metadata: {
+            source: snapshot?.source || 'json_payload',
+            generatedAt: snapshot?.generatedAt || null,
+            slug: normalized.slug || null,
+            title: normalized.title || null,
+            version: normalized.version || null,
+            lastReviewedAt: normalized.lastReviewedAt || null
+        }
+    };
 }
 
 function normalizeEntityValue(value) {
@@ -110,9 +206,8 @@ function normalizeAiResults(rawResults) {
             const snippet = conflict.snippet || '';
             const explicitType = conflict.type === 'fuzzy_match' || conflict.type === 'mismatch' ? conflict.type : null;
             const classified = classifyDifference(canonical, found);
+            if (classified.type === 'exact_match') return;
             const type = explicitType || classified.type;
-
-            if (type === 'exact_match') return;
 
             const severity = type === 'fuzzy_match' ? 'low' : 'high';
             const confidence = typeof conflict.confidence === 'number' ? conflict.confidence : classified.confidence;
@@ -175,7 +270,26 @@ async function crawlUrl(url) {
             },
             timeout: 15000
         });
-        const $ = cheerio.load(response.data);
+
+        const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+        const payload = response.data;
+        const looksLikeJson = contentType.includes('application/json') || typeof payload === 'object';
+
+        if (looksLikeJson) {
+            const snapshot = typeof payload === 'string' ? JSON.parse(payload) : payload;
+            const flattened = flattenCanonicalSnapshot(snapshot);
+            return {
+                url,
+                extracted_text: flattened.extractedText.substring(0, 15000),
+                chunksArray: flattened.extractedText.split('\n').filter(Boolean),
+                chunks: flattened.extractedText.length ? flattened.extractedText.split('\n').filter(Boolean).length : 0,
+                derived_fields: flattened.derivedFields,
+                canonical_meta: flattened.metadata,
+                success: true
+            };
+        }
+
+        const $ = cheerio.load(String(payload));
 
         // Remove boilerplate/noise elements
         $('script, style, nav, footer, iframe, noscript, header, svg, img, form, button').remove();
@@ -287,11 +401,129 @@ function runLocalEngine(canonicalData, targetsData, fields) {
         });
 
         if (fieldResult.conflicts.length > 0) {
-            results[field.toLowerCase().replace(/ /g, '_')] = fieldResult;
+            results[toFieldKey(field)] = fieldResult;
         }
     });
 
     return results;
+}
+
+function buildFieldMatrix(canonicalData, targetsData, fields, conflictResults = {}) {
+    const matrix = {};
+    const resultsEntries = Object.entries(conflictResults || {});
+
+    const findAiField = (field) => {
+        const key = toFieldKey(field);
+        if (conflictResults[key]) return conflictResults[key];
+        if (conflictResults[field]) return conflictResults[field];
+
+        let best = null;
+        let bestScore = 0;
+        resultsEntries.forEach(([candidateKey, candidateValue]) => {
+            const score = stringSimilarity.compareTwoStrings(
+                key.replace(/_/g, ' '),
+                String(candidateKey || '').replace(/_/g, ' ')
+            );
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidateValue;
+            }
+        });
+        return bestScore >= 0.74 ? best : null;
+    };
+
+    fields.forEach((field) => {
+        const fieldKey = toFieldKey(field);
+        const aiField = findAiField(field);
+        const canonicalMatch = extractHeuristic(canonicalData.chunksArray, field);
+        const canonical = aiField?.canonical || canonicalMatch?.value || '';
+        const fieldType = aiField?.type || inferFieldType(field);
+        let fieldSeverity = aiField?.severity || 'low';
+
+        const conflictsByUrl = new Map(
+            (aiField?.conflicts || []).map((conflict) => [conflict.url, conflict])
+        );
+
+        const comparisons = targetsData.map((target) => {
+            const aiConflict = conflictsByUrl.get(target.url);
+            const targetMatch = extractHeuristic(target.chunksArray, field);
+
+            if (aiConflict) {
+                const aiFound = aiConflict.found || '';
+                const canonicalForCheck = canonical || aiField?.canonical || '';
+                const exactCheck = classifyDifference(canonicalForCheck, aiFound);
+                if (exactCheck.type === 'exact_match') {
+                    return {
+                        url: target.url,
+                        found: aiFound,
+                        type: 'exact_match',
+                        severity: 'low',
+                        snippet: aiConflict.snippet || targetMatch?.snippet || '',
+                        confidence: typeof aiConflict.confidence === 'number' ? aiConflict.confidence : exactCheck.confidence
+                    };
+                }
+
+                return {
+                    url: target.url,
+                    found: aiFound,
+                    type: aiConflict.type || 'mismatch',
+                    severity: aiConflict.severity || 'high',
+                    snippet: aiConflict.snippet || targetMatch?.snippet || '',
+                    confidence: typeof aiConflict.confidence === 'number' ? aiConflict.confidence : undefined
+                };
+            }
+
+            if (!targetMatch) {
+                if (fieldSeverity !== 'high') fieldSeverity = 'medium';
+                return {
+                    url: target.url,
+                    found: '',
+                    type: 'not_found',
+                    severity: 'medium',
+                    snippet: '',
+                    confidence: undefined
+                };
+            }
+
+            if (!canonical) {
+                if (fieldSeverity !== 'high') fieldSeverity = 'medium';
+                return {
+                    url: target.url,
+                    found: targetMatch.value,
+                    type: 'not_found',
+                    severity: 'medium',
+                    snippet: targetMatch.snippet,
+                    confidence: undefined
+                };
+            }
+
+            const classified = classifyDifference(canonical, targetMatch.value);
+            if (classified.severity === 'high') {
+                fieldSeverity = 'high';
+            } else if (fieldSeverity !== 'high' && classified.type === 'fuzzy_match') {
+                fieldSeverity = 'low';
+            }
+
+            return {
+                url: target.url,
+                found: targetMatch.value,
+                type: classified.type,
+                severity: classified.type === 'exact_match' ? 'low' : classified.severity,
+                snippet: targetMatch.snippet,
+                confidence: classified.confidence
+            };
+        });
+
+        matrix[fieldKey] = {
+            label: field,
+            canonical,
+            type: fieldType,
+            severity: fieldSeverity,
+            comparisons
+        };
+    });
+
+    return matrix;
 }
 // ----------------------------------------------------
 
@@ -300,7 +532,18 @@ app.post('/api/scan', async (req, res) => {
     const { canonicalUrl, targetUrls, fields } = req.body;
 
     try {
-        const allUrls = [canonicalUrl, ...targetUrls];
+        const normalizedTargetUrls = Array.isArray(targetUrls)
+            ? targetUrls.map((url) => String(url || '').trim()).filter(Boolean)
+            : [];
+        const requestedFields = Array.isArray(fields)
+            ? fields.map((field) => String(field || '').trim()).filter(Boolean)
+            : [];
+
+        if (!canonicalUrl || normalizedTargetUrls.length === 0) {
+            return res.status(400).json({ error: 'canonicalUrl and at least one target URL are required.' });
+        }
+
+        const allUrls = [String(canonicalUrl).trim(), ...normalizedTargetUrls];
 
         // Step 1: Aggressive Text Extraction with Rate Limiting (DDoS Protection)
         console.log(`Crawling ${allUrls.length} URLs (Batching concurrency: 2)...`);
@@ -319,11 +562,13 @@ app.post('/api/scan', async (req, res) => {
 
         const canonicalData = crawlResults[0];
         const targetsData = crawlResults.slice(1);
+        const fallbackFields = Array.isArray(canonicalData?.derived_fields) ? canonicalData.derived_fields : [];
+        const effectiveFields = requestedFields.length > 0 ? requestedFields : fallbackFields;
 
         let structuredResults = {};
         const anthropicEnabled = isAnthropicEnabled();
         const ollamaEnabled = isOllamaEnabled();
-        const promptText = buildPrompt(canonicalUrl, canonicalData, targetsData, fields);
+        const promptText = buildPrompt(canonicalUrl, canonicalData, targetsData, effectiveFields);
         let engineUsed = "Local_Regex_Heuristic";
 
         if (anthropicEnabled) {
@@ -355,7 +600,7 @@ app.post('/api/scan', async (req, res) => {
                     temperature: 0
                 }
             }, {
-                timeout: 120000
+                timeout: OLLAMA_TIMEOUT_MS
             });
 
             const llmOutput = ollamaResponse?.data?.response || '';
@@ -369,12 +614,30 @@ app.post('/api/scan', async (req, res) => {
         } else {
             // --- USE FREE LOCAL HEURISTIC FALLBACK ---
             console.log("No valid API Key. Falling back to Local Heuristic NLP Engine...");
-            structuredResults = runLocalEngine(canonicalData, targetsData, fields);
+            structuredResults = runLocalEngine(canonicalData, targetsData, effectiveFields);
         }
+
+        const discoveredFields = Object.keys(structuredResults || {}).map((key) =>
+            key.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+        );
+        const finalFields = effectiveFields.length > 0 ? effectiveFields : discoveredFields;
+        const fieldMatrix = buildFieldMatrix(canonicalData, targetsData, finalFields, structuredResults);
+        const canonicalMeta = {
+            url: canonicalData?.url || String(canonicalUrl || ''),
+            source: canonicalData?.canonical_meta?.source || 'web_page',
+            generatedAt: canonicalData?.canonical_meta?.generatedAt || null,
+            slug: canonicalData?.canonical_meta?.slug || null,
+            title: canonicalData?.canonical_meta?.title || null,
+            version: canonicalData?.canonical_meta?.version || null,
+            lastReviewedAt: canonicalData?.canonical_meta?.lastReviewedAt || null
+        };
 
         res.json({
             raw_data: crawlResults,
             results: structuredResults,
+            field_matrix: fieldMatrix,
+            watched_fields: finalFields,
+            canonical_meta: canonicalMeta,
             engine_used: engineUsed
         });
         lastEngineUsed = engineUsed;
