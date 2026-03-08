@@ -4,6 +4,7 @@ const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const stringSimilarity = require('string-similarity');
+const pLimit = require('p-limit');
 const { Anthropic } = require('@anthropic-ai/sdk');
 
 const app = express();
@@ -154,9 +155,19 @@ app.post('/api/scan', async (req, res) => {
     try {
         const allUrls = [canonicalUrl, ...targetUrls];
 
-        // Step 1: Aggressive Text Extraction
-        console.log("Crawling URLs...");
-        const crawlPromises = allUrls.map(url => crawlUrl(url));
+        // Step 1: Aggressive Text Extraction with Rate Limiting (DDoS Protection)
+        console.log(`Crawling ${allUrls.length} URLs (Batching concurrency: 2)...`);
+
+        // Use p-limit to prevent slamming the server with concurrent requests
+        const limit = pLimit(2);
+        const crawlPromises = allUrls.map((url, index) => limit(async () => {
+            // Add a polite delay between starting requests if not the first one
+            if (index > 0) {
+                await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second "politeness" delay
+            }
+            return crawlUrl(url);
+        }));
+
         const crawlResults = await Promise.all(crawlPromises);
 
         const canonicalData = crawlResults[0];

@@ -23,6 +23,16 @@ For production-grade intelligence, the system utilizes an API key to parse the r
 
 ---
 
+## 🛡️ Polite Crawling & Safety (DDoS Protection)
+
+University websites often have aggressive rate-limiters and security filters. To ensure you don't inadvertently trigger a DDoS alert or get your IP blacklisted:
+
+- **Concurrency Limit:** The backend is configured to crawl a maximum of **2 URLs simultaneously**.
+- **Polite Delays:** The engine waits for **1 second** between starting each new request in a batch.
+- **Customizable:** You can adjust these safety thresholds in `server/index.js` by modifying the `pLimit` value and the `setTimeout` delay within the scan route.
+
+---
+
 ## 🛠️ Installation & Setup
 
 1. **Install Frontend Dependencies:**
