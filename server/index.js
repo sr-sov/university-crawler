@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const cheerio = require('cheerio');
 const stringSimilarity = require('string-similarity');
 const pLimit = require('p-limit');
 const { Anthropic } = require('@anthropic-ai/sdk');
@@ -17,31 +16,21 @@ const anthropic = new Anthropic({
 
 async function crawlUrl(url) {
     try {
-        const response = await axios.get(url, {
+        const response = await axios.get(`https://r.jina.ai/${url}`, {
             headers: {
+                'Accept': 'application/json',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             },
-            timeout: 15000
-        });
-        const $ = cheerio.load(response.data);
-
-        // Remove boilerplate/noise elements
-        $('script, style, nav, footer, iframe, noscript, header, svg, img, form, button').remove();
-
-        // Extract text blocks
-        const chunks = [];
-        $('h1, h2, h3, h4, h5, p, li, td, th').each((i, el) => {
-            const text = $(el).text().replace(/\s+/g, ' ').trim();
-            // Only keep substantial chunks to avoid link noise
-            if (text.length > 20) {
-                chunks.push(text);
-            }
+            timeout: 30000
         });
 
-        let extractedText = chunks.join('\n\n');
-        if (extractedText.length < 50) {
-            extractedText = $('body').text().replace(/\s+/g, ' ').trim();
+        let extractedText = "";
+
+        if (response.data && response.data.data && response.data.data.content) {
+            extractedText = response.data.data.content;
         }
+
+        const chunks = extractedText.split(/\n\s*\n/).map(chunk => chunk.replace(/\s+/g, ' ').trim()).filter(chunk => chunk.length > 10);
 
         return {
             url,
