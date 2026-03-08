@@ -15,6 +15,71 @@ const anthropic = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY || 'fake_key',
 });
 
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1:8b-instruct-q4_K_M';
+const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022';
+let lastEngineUsed = 'none';
+
+function isAnthropicEnabled() {
+    return Boolean(
+        process.env.ANTHROPIC_API_KEY &&
+        !process.env.ANTHROPIC_API_KEY.includes('your_api_key')
+    );
+}
+
+function isOllamaEnabled() {
+    return process.env.OLLAMA_ENABLED === 'true';
+}
+
+function selectEngine() {
+    if (isAnthropicEnabled()) return 'Anthropic_Claude';
+    if (isOllamaEnabled()) return `Ollama_${OLLAMA_MODEL}`;
+    return 'Local_Regex_Heuristic';
+}
+
+function buildPrompt(canonicalUrl, canonicalData, targetsData, fields) {
+    const fieldsDescription = fields.join(', ');
+    let promptText = `You are an automated data consistency verifier. Your job is to extract facts from unstructured web raw text dumps, and compare secondary domains against the primary canonical truth.\n\n`;
+    promptText += `AUTHORITATIVE SOURCE (CANONICAL): URL: ${canonicalUrl}\n---\n${canonicalData.extracted_text}\n---\n\n`;
+    promptText += `TARGET SOURCES TO VERIFY:\n`;
+    targetsData.forEach((target, i) => {
+        promptText += `Source ${i + 1}: URL: ${target.url}\n---\n${target.extracted_text}\n---\n\n`;
+    });
+    promptText += `Please analyze the target sources against the canonical source. Look specifically to verify consistency regarding these conceptual fields: ${fieldsDescription}.\n\n`;
+    promptText += `Rules:\n1. Normalize semantic variations (e.g. "Dr. Sarah Thompson" is a fuzzy_match to "Sarah Thompson", but "Dan Rivera" is a mismatch).\n2. Output strict JSON with NO Markdown formatting and no extra prose. Start with {"results": ...}\n`;
+    return promptText;
+}
+
+function parseResultsFromModelOutput(outputText) {
+    const jsonStr = outputText.substring(outputText.indexOf('{'), outputText.lastIndexOf('}') + 1);
+    return JSON.parse(jsonStr).results || {};
+}
+
+async function getOllamaHealth() {
+    const ollamaEnabled = isOllamaEnabled();
+    const result = {
+        enabled: ollamaEnabled,
+        base_url: OLLAMA_BASE_URL,
+        model: OLLAMA_MODEL,
+        reachable: false,
+        model_installed: false,
+        error: null
+    };
+
+    if (!ollamaEnabled) return result;
+
+    try {
+        const response = await axios.get(`${OLLAMA_BASE_URL}/api/tags`, { timeout: 5000 });
+        result.reachable = true;
+        const models = response?.data?.models || [];
+        result.model_installed = models.some((m) => m?.name === OLLAMA_MODEL);
+    } catch (error) {
+        result.error = error.message;
+    }
+
+    return result;
+}
+
 async function crawlUrl(url) {
     try {
         const response = await axios.get(url, {
@@ -173,25 +238,17 @@ app.post('/api/scan', async (req, res) => {
         const canonicalData = crawlResults[0];
         const targetsData = crawlResults.slice(1);
 
-        const IS_KEY_VALID = process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_API_KEY.includes('your_api_key');
-
         let structuredResults = {};
+        const anthropicEnabled = isAnthropicEnabled();
+        const ollamaEnabled = isOllamaEnabled();
+        const promptText = buildPrompt(canonicalUrl, canonicalData, targetsData, fields);
+        let engineUsed = "Local_Regex_Heuristic";
 
-        if (IS_KEY_VALID) {
+        if (anthropicEnabled) {
             // --- USE FULL CLAUDE AI LLM ---
             console.log("Valid Key detected. Analyzing with Anthropic Claude LLM...");
-            const fieldsDescription = fields.join(', ');
-            let promptText = `You are an automated data consistency verifier. Your job is to extract facts from unstructured web raw text dumps, and compare secondary domains against the primary canonical truth.\n\n`;
-            promptText += `AUTHORITATIVE SOURCE (CANONICAL): URL: ${canonicalUrl}\n---\n${canonicalData.extracted_text}\n---\n\n`;
-            promptText += `TARGET SOURCES TO VERIFY:\n`;
-            targetsData.forEach((target, i) => {
-                promptText += `Source ${i + 1}: URL: ${target.url}\n---\n${target.extracted_text}\n---\n\n`;
-            });
-            promptText += `Please analyze the target sources against the canonical source. Look specifically to verify consistency regarding these conceptual fields: ${fieldsDescription}.\n\n`;
-            promptText += `Rules:\n1. Normalize semantic variations (e.g. "Dr. Sarah Thompson" is a fuzzy_match to "Sarah Thompson", but "Dan Rivera" is a mismatch).\n2. Output strict JSON with NO Markdown formatting whatsoever, just the JSON string starting with {"results": ...}\n`;
-
             const aiResponse = await anthropic.messages.create({
-                model: "claude-3-5-sonnet-20241022",
+                model: ANTHROPIC_MODEL,
                 max_tokens: 4096,
                 temperature: 0,
                 messages: [{ role: "user", content: promptText }]
@@ -199,11 +256,33 @@ app.post('/api/scan', async (req, res) => {
 
             const llmOutput = aiResponse.content[0].text;
             try {
-                const jsonStr = llmOutput.substring(llmOutput.indexOf('{'), llmOutput.lastIndexOf('}') + 1);
-                structuredResults = JSON.parse(jsonStr).results || {};
+                structuredResults = parseResultsFromModelOutput(llmOutput);
+                engineUsed = "Anthropic_Claude";
             } catch (e) {
                 console.error("Failed to parse LLM JSON", e);
                 return res.status(500).json({ error: "Failed to parse AI structure. Raw text: " + llmOutput });
+            }
+        } else if (ollamaEnabled) {
+            // --- USE LOCAL OLLAMA AI LLM ---
+            console.log(`Ollama enabled. Analyzing with local model: ${OLLAMA_MODEL}`);
+            const ollamaResponse = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
+                model: OLLAMA_MODEL,
+                prompt: promptText,
+                stream: false,
+                options: {
+                    temperature: 0
+                }
+            }, {
+                timeout: 120000
+            });
+
+            const llmOutput = ollamaResponse?.data?.response || '';
+            try {
+                structuredResults = parseResultsFromModelOutput(llmOutput);
+                engineUsed = `Ollama_${OLLAMA_MODEL}`;
+            } catch (e) {
+                console.error("Failed to parse Ollama JSON", e);
+                return res.status(500).json({ error: "Failed to parse Ollama structure. Raw text: " + llmOutput });
             }
         } else {
             // --- USE FREE LOCAL HEURISTIC FALLBACK ---
@@ -214,12 +293,39 @@ app.post('/api/scan', async (req, res) => {
         res.json({
             raw_data: crawlResults,
             results: structuredResults,
-            engine_used: IS_KEY_VALID ? "Anthropic_Claude" : "Local_Regex_Heuristic"
+            engine_used: engineUsed
         });
+        lastEngineUsed = engineUsed;
 
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/health', async (_req, res) => {
+    try {
+        const anthropicConfigured = isAnthropicEnabled();
+        const selectedEngine = selectEngine();
+        const ollamaHealth = await getOllamaHealth();
+
+        res.json({
+            ok: true,
+            selected_engine: selectedEngine,
+            last_engine_used: lastEngineUsed,
+            anthropic: {
+                configured: anthropicConfigured,
+                model: ANTHROPIC_MODEL,
+                being_used: selectedEngine === 'Anthropic_Claude'
+            },
+            ollama: {
+                ...ollamaHealth,
+                being_used: selectedEngine.startsWith('Ollama_')
+            }
+        });
+    } catch (error) {
+        console.error('Health check failed:', error);
+        res.status(500).json({ ok: false, error: error.message });
     }
 });
 
