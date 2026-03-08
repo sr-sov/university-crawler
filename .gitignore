@@ -5,6 +5,7 @@ dist/
 server/.env
 .env
 .env.local
+notes.txt
 
 # logs
 npm-debug.log*
