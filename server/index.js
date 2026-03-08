@@ -46,13 +46,100 @@ function buildPrompt(canonicalUrl, canonicalData, targetsData, fields) {
         promptText += `Source ${i + 1}: URL: ${target.url}\n---\n${target.extracted_text}\n---\n\n`;
     });
     promptText += `Please analyze the target sources against the canonical source. Look specifically to verify consistency regarding these conceptual fields: ${fieldsDescription}.\n\n`;
-    promptText += `Rules:\n1. Normalize semantic variations (e.g. "Dr. Sarah Thompson" is a fuzzy_match to "Sarah Thompson", but "Dan Rivera" is a mismatch).\n2. Output strict JSON with NO Markdown formatting and no extra prose. Start with {"results": ...}\n`;
+    promptText += `Rules:\n`;
+    promptText += `1. Normalize semantic variations. Minor typo/format variants are fuzzy_match + low severity (e.g. "Sarah" vs "Sara", "Sarah" vs "Sarah C").\n`;
+    promptText += `2. Clearly different entities are mismatch + high severity (e.g. "Sarah" vs "Dan").\n`;
+    promptText += `3. Output strict JSON only (no markdown, no prose) using this schema exactly:\n`;
+    promptText += `{"results":{"<field_key>":{"canonical":"...","type":"entity|date|contact","severity":"low|medium|high","conflicts":[{"url":"https://...","found":"...","type":"fuzzy_match|mismatch","severity":"low|high","snippet":"...","confidence":0.0}]}}}\n`;
     return promptText;
 }
 
 function parseResultsFromModelOutput(outputText) {
     const jsonStr = outputText.substring(outputText.indexOf('{'), outputText.lastIndexOf('}') + 1);
     return JSON.parse(jsonStr).results || {};
+}
+
+function normalizeEntityValue(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/\b(dr|mr|mrs|ms|prof)\.?\b/g, ' ')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function classifyDifference(canonicalValue, foundValue) {
+    const canonicalNorm = normalizeEntityValue(canonicalValue);
+    const foundNorm = normalizeEntityValue(foundValue);
+
+    if (!canonicalNorm || !foundNorm) {
+        return { type: 'mismatch', severity: 'high', confidence: 0.5 };
+    }
+
+    if (canonicalNorm === foundNorm) {
+        return { type: 'exact_match', severity: 'low', confidence: 0.99 };
+    }
+
+    const similarity = stringSimilarity.compareTwoStrings(canonicalNorm, foundNorm);
+    const prefixVariant = canonicalNorm.startsWith(foundNorm) || foundNorm.startsWith(canonicalNorm);
+    const likelyMinorVariant = similarity >= 0.82 || prefixVariant;
+
+    if (likelyMinorVariant) {
+        return { type: 'fuzzy_match', severity: 'low', confidence: Math.max(similarity, 0.65) };
+    }
+
+    return { type: 'mismatch', severity: 'high', confidence: Math.max(similarity, 0.2) };
+}
+
+function normalizeAiResults(rawResults) {
+    const normalizedResults = {};
+    const entries = Object.entries(rawResults || {});
+
+    entries.forEach(([fieldKey, fieldData]) => {
+        if (!fieldData || typeof fieldData !== 'object') return;
+
+        const canonical = fieldData.canonical || fieldData.canonical_value || '';
+        const fieldType = fieldData.type || 'entity';
+        const rawConflicts = Array.isArray(fieldData.conflicts) ? fieldData.conflicts : (Array.isArray(fieldData.target) ? fieldData.target : []);
+        const conflicts = [];
+        let fieldSeverity = 'low';
+
+        rawConflicts.forEach((conflict) => {
+            const url = conflict.url || conflict.source_url || conflict.source || '';
+            const found = conflict.found || conflict.value || conflict.source || '';
+            const snippet = conflict.snippet || '';
+            const explicitType = conflict.type === 'fuzzy_match' || conflict.type === 'mismatch' ? conflict.type : null;
+            const classified = classifyDifference(canonical, found);
+            const type = explicitType || classified.type;
+
+            if (type === 'exact_match') return;
+
+            const severity = type === 'fuzzy_match' ? 'low' : 'high';
+            const confidence = typeof conflict.confidence === 'number' ? conflict.confidence : classified.confidence;
+
+            if (severity === 'high') fieldSeverity = 'high';
+
+            conflicts.push({
+                url,
+                found,
+                type,
+                severity,
+                snippet,
+                confidence
+            });
+        });
+
+        if (conflicts.length === 0) return;
+
+        normalizedResults[fieldKey] = {
+            canonical,
+            type: fieldType,
+            severity: fieldSeverity,
+            conflicts
+        };
+    });
+
+    return normalizedResults;
 }
 
 async function getOllamaHealth() {
@@ -172,7 +259,7 @@ function runLocalEngine(canonicalData, targetsData, fields) {
 
         const fieldResult = {
             canonical: canonicalMatch.value,
-            severity: "medium", // Default heuristic severity
+            severity: "low",
             type: field.toLowerCase().includes('year') ? 'date' : field.toLowerCase().includes('phone') ? 'contact' : 'entity',
             conflicts: []
         };
@@ -182,25 +269,20 @@ function runLocalEngine(canonicalData, targetsData, fields) {
             const targetMatch = extractHeuristic(target.chunksArray, field);
             if (!targetMatch) return; // Not found on this page
 
-            const similarity = stringSimilarity.compareTwoStrings(
-                canonicalMatch.value.toLowerCase(),
-                targetMatch.value.toLowerCase()
-            );
+            const classified = classifyDifference(canonicalMatch.value, targetMatch.value);
+            if (classified.type === 'exact_match') return;
 
-            // If completely equal, no conflict
-            if (similarity > 0.95) return;
-
-            // Determine match type
-            const matchType = similarity > 0.60 ? 'fuzzy_match' : 'mismatch';
-            const severity = similarity > 0.60 ? 'low' : 'high';
+            const matchType = classified.type;
+            const severity = classified.severity;
             if (severity === 'high') fieldResult.severity = 'high';
 
             fieldResult.conflicts.push({
                 url: target.url,
                 found: targetMatch.value,
                 type: matchType,
+                severity,
                 snippet: targetMatch.snippet,
-                confidence: similarity < 0.2 ? 0.9 : similarity // Heuristic confidence mapped
+                confidence: classified.confidence
             });
         });
 
@@ -256,7 +338,7 @@ app.post('/api/scan', async (req, res) => {
 
             const llmOutput = aiResponse.content[0].text;
             try {
-                structuredResults = parseResultsFromModelOutput(llmOutput);
+                structuredResults = normalizeAiResults(parseResultsFromModelOutput(llmOutput));
                 engineUsed = "Anthropic_Claude";
             } catch (e) {
                 console.error("Failed to parse LLM JSON", e);
@@ -278,7 +360,7 @@ app.post('/api/scan', async (req, res) => {
 
             const llmOutput = ollamaResponse?.data?.response || '';
             try {
-                structuredResults = parseResultsFromModelOutput(llmOutput);
+                structuredResults = normalizeAiResults(parseResultsFromModelOutput(llmOutput));
                 engineUsed = `Ollama_${OLLAMA_MODEL}`;
             } catch (e) {
                 console.error("Failed to parse Ollama JSON", e);

@@ -21,6 +21,33 @@ For production-grade intelligence, the system utilizes an API key to parse the r
 - **Resolution:** The AI maps facts across documents and explicitly highlights mismatches with confidence scores, returning strict JSON directly to the frontend interface.
 - **Cost:** Costs fractions of a penny per crawled page via Anthropic's API pricing.
 
+### Engine 3: Ollama Local LLM (Self-Hosted)
+When enabled, Ollama uses the same semantic extraction pipeline as Anthropic but runs entirely on your machine.
+- **How it works:** The backend sends cleaned text chunks to your local Ollama model through `http://localhost:11434/api/generate`.
+- **Resolution:** The model returns structured JSON with canonical values and per-target conflicts.
+- **Cost:** $0 API spend after model download (local compute only).
+
+---
+
+## 🎯 Matching & Severity Rules
+
+All engines compare each target page against the canonical source and classify differences with the same intent:
+
+- **Exact Match:** Same normalized value. Not flagged as a conflict.
+- **Fuzzy Match (Low Severity):** Minor spelling/title/format variants (for example `Sarah` vs `Sara`, `Sarah` vs `Sarah C`).
+- **Mismatch (High Severity):** Clearly different values (for example `Sarah` vs `Dan`).
+
+### Local Heuristic Engine
+- Uses Regex extraction plus `string-similarity`.
+- Applies normalization before comparison (case/punctuation/title cleanup).
+- Emits conflict-level fields: `type`, `severity`, `confidence`, `snippet`.
+- Field severity is escalated to `high` if any conflict is a `mismatch`; otherwise it remains `low` for fuzzy-only conflicts.
+
+### Anthropic / Ollama Engines
+- Prompt enforces strict JSON output and requires explicit conflict classification.
+- Backend post-processes model output to normalize shape and apply fallback classification if type/severity is missing.
+- This keeps typo/variant handling consistent with local heuristics and prevents model-format drift from breaking UI interpretation.
+
 ---
 
 ## 🛡️ Polite Crawling & Safety (DDoS Protection)
