@@ -11,3 +11,12 @@ notes.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# local analysis artifacts
+scan-results/
+result-thoughts.md
+
+# local canonical/source snapshots
+canon.json
+notes.txt
+notesv2.txt
