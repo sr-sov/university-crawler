@@ -1,0 +1,58 @@
+{
+  "name": "upou_expected_labels_v1",
+  "description": "Starter regression truth-set from manual review and validated fixes.",
+  "labels": [
+    {
+      "watched_field": "Chancellor",
+      "target_url": "https://www.upou.edu.ph/about/office-of-the-chancellor/",
+      "expected_canonical_ref": "Key University Officials.Chancellor",
+      "expected_status": "match",
+      "expected_found_contains": "Joane V. Serrano, PhD",
+      "notes": "Exact same person/title should not be downgraded."
+    },
+    {
+      "watched_field": "Chancellor",
+      "target_url": "https://registrar.upou.edu.ph/admission/",
+      "expected_canonical_ref": "Key University Officials.Chancellor",
+      "expected_status": "no_match",
+      "notes": "Must not drift to Vice Chancellor canonical refs."
+    },
+    {
+      "watched_field": "Vice Chancellor for Academic Affairs",
+      "target_url": "https://www.upou.edu.ph/about/office-of-the-chancellor/",
+      "expected_canonical_ref": "Key University Officials.Vice Chancellor for Academic Affairs",
+      "expected_status": "no_match",
+      "notes": "Must not map to Chancellor canonical ref."
+    },
+    {
+      "watched_field": "Vice Chancellor for Finance and Administration",
+      "target_url": "https://registrar.upou.edu.ph/admission/",
+      "expected_canonical_ref": "Key University Officials.Vice Chancellor for Finance and Administration",
+      "expected_status": "no_match",
+      "notes": "Must never map to Financial Information.Miscellaneous fees."
+    },
+    {
+      "watched_field": "Hard copies of admission documents by mail",
+      "target_url": "https://registrar.upou.edu.ph/admission/",
+      "expected_canonical_ref": "General Admissions Policies[3]",
+      "expected_status": "fuzzy_match",
+      "expected_found_contains": "requires applicants to submit the hard copy of all admission documents",
+      "notes": "Equivalent policy wording should not return no_match."
+    },
+    {
+      "watched_field": "Application fee (Foreign undergraduate)",
+      "target_url": "https://registrar.upou.edu.ph/bachelors-program/",
+      "expected_canonical_ref": "Financial Information.Application fee (non-refundable)",
+      "expected_status": "match",
+      "expected_found_contains": "USD 75.00",
+      "notes": "Contains exact fee amount for non-Filipino citizens."
+    },
+    {
+      "watched_field": "Application fee (Foreign undergraduate)",
+      "target_url": "https://registrar.upou.edu.ph/contact-us/",
+      "expected_canonical_ref": "Financial Information.Application fee (non-refundable)",
+      "expected_status": "no_match",
+      "notes": "Phone numbers/extensions must not fuzzy-match fee fields."
+    }
+  ]
+}
