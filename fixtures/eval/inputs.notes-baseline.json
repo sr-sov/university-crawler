@@ -1,0 +1,26 @@
+{
+  "name": "upou_notes_baseline",
+  "source": "notes.txt + notesv2.txt",
+  "canonical_url": "http://localhost:4000/api/admissions",
+  "target_urls": [
+    "https://www.upou.edu.ph/about/office-of-the-chancellor/",
+    "https://registrar.upou.edu.ph/admission/",
+    "https://registrar.upou.edu.ph/bachelors-program/",
+    "https://our.upou.edu.ph/oas"
+  ],
+  "watched_fields": [
+    "Chancellor",
+    "Vice Chancellor for Academic Affairs",
+    "Vice Chancellor for Finance and Administration",
+    "Hard copies of admission documents by mail",
+    "UgAT requirement",
+    "UPCAT requirement",
+    "Tuition per unit",
+    "Application fee (Filipino undergraduate)",
+    "Application fee (Foreign undergraduate)",
+    "Admission inquiries email",
+    "Technical support email",
+    "Mailing address",
+    "1st Trimester AY 2026-2027 deadline"
+  ]
+}

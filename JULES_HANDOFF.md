@@ -33,6 +33,36 @@ Expected per-fact output contract:
 }
 ```
 
+## Baseline Inputs (from `notes.txt` / `notesv2.txt`)
+Use these as default evaluation inputs unless explicitly changed:
+
+Canonical URL:
+- `http://localhost:4000/api/admissions`
+
+Target URLs:
+1. `https://www.upou.edu.ph/about/office-of-the-chancellor/`
+2. `https://registrar.upou.edu.ph/admission/`
+3. `https://registrar.upou.edu.ph/bachelors-program/`
+4. `https://our.upou.edu.ph/oas`
+
+Watched fields:
+1. `Chancellor`
+2. `Vice Chancellor for Academic Affairs`
+3. `Vice Chancellor for Finance and Administration`
+4. `Hard copies of admission documents by mail`
+5. `UgAT requirement`
+6. `UPCAT requirement`
+7. `Tuition per unit`
+8. `Application fee (Filipino undergraduate)`
+9. `Application fee (Foreign undergraduate)`
+10. `Admission inquiries email`
+11. `Technical support email`
+12. `Mailing address`
+13. `1st Trimester AY 2026-2027 deadline`
+
+Machine-readable version:
+- `fixtures/eval/inputs.notes-baseline.json`
+
 ## Current Matching Design
 ### Candidate selection
 - `getCanonicalCandidates(...)` ranks claims + flat refs.
@@ -91,3 +121,23 @@ Practical interpretation:
 - Keep deterministic checks authoritative for typed fields.
 - Use LLM narrowly and auditable (small prompt scope + evidence IDs).
 - Preserve the CANON API contract and output compatibility.
+
+## Offline Fixtures Included for Jules
+If localhost APIs are unavailable in Jules environment, use repository fixtures:
+
+Canonical fixtures:
+1. `fixtures/canonical/admissions.snapshot.json`
+2. `fixtures/canonical/admissions.flat.json`
+3. `fixtures/canonical/admissions.claims.jsonl`
+
+Target fixtures:
+1. `fixtures/targets/upou-target-snapshots.json`
+2. `fixtures/targets/office-of-the-chancellor.txt`
+3. `fixtures/targets/registrar-admission.txt`
+4. `fixtures/targets/registrar-bachelors-program.txt`
+5. `fixtures/targets/our-oas.txt`
+6. `fixtures/targets/registrar-contact-us.txt`
+
+Evaluation fixtures:
+1. `fixtures/eval/inputs.notes-baseline.json`
+2. `fixtures/eval/expected-labels.v1.json`
