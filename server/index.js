@@ -189,14 +189,16 @@ function normalizeName(value) {
 }
 
 function extractPossibleNameFragments(text) {
-    const cleaned = normalizeWhitespace(text);
-    if (!cleaned) return [];
+    const textStr = String(text || '');
+    if (!textStr) return [];
     const out = [];
-    cleaned.split(/[\n;,.()]/).forEach((part) => {
-        const fragment = normalizeName(part);
-        if (!fragment) return;
-        const tokens = fragment.split(' ').filter(Boolean);
-        if (tokens.length >= 2 && tokens.length <= 6) out.push(tokens.join(' '));
+    textStr.split(/[\n;():|]/).forEach((part) => {
+        part.split(',').forEach(subPart => {
+            const fragment = normalizeName(subPart);
+            if (!fragment) return;
+            const tokens = fragment.split(' ').filter(Boolean);
+            if (tokens.length >= 2 && tokens.length <= 6) out.push(tokens.join(' '));
+        })
     });
     return Array.from(new Set(out));
 }
@@ -622,7 +624,11 @@ async function crawlUrl(url) {
 
         let extractedText = chunks.join('\n\n');
         if (extractedText.length < 50) {
-            extractedText = $('body').text().replace(/\s+/g, ' ').trim();
+            const bodyLines = $('body').text().split('\n').map(t => t.trim()).filter(Boolean);
+            extractedText = bodyLines.join('\n\n');
+            if (chunks.length === 0) {
+                chunks.push(...bodyLines);
+            }
         }
 
         return {
