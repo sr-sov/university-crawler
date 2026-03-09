@@ -4,6 +4,13 @@ A comprehensive web-scraping and data reconciliation tool built to find inconsis
 
 Unlike traditional web scrapers that rely on fragile CSS selectors, this engine **extracts raw visible text** from target subdomains and uses **Semantic Intelligence** to cross-examine facts against a defined authoritative "Canonical Truth".
 
+## 📌 Maintainer Onboarding
+
+For agent/maintainer context on current architecture, matching strategy, and roadmap:
+
+- [`CANON_API.md`](./CANON_API.md) — canonical API contract and field-by-field matching spec
+- [`JULES_HANDOFF.md`](./JULES_HANDOFF.md) — implementation status, design intent, and next-step priorities
+
 ## 🚀 Two-Tier Content Resolution System
 
 The backend architecture automatically switches between two resolution engines based on your environment:

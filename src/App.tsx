@@ -13,29 +13,53 @@ import {
   ExternalLink
 } from 'lucide-react';
 
-const CRAWLER_API_BASE = (import.meta.env.VITE_CRAWLER_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
-const DEFAULT_CANONICAL_URL = import.meta.env.VITE_DEFAULT_CANONICAL_URL || 'http://localhost:4000/api/admissions';
-const DEFAULT_TARGET_URLS = import.meta.env.VITE_DEFAULT_TARGET_URLS || 'https://our.upou.edu.ph/oas/, https://www.upou.edu.ph/, https://registrar.upou.edu.ph/admission, https://registrar.upou.edu.ph/bachelors-program';
-const DEFAULT_WATCHED_FIELDS = import.meta.env.VITE_DEFAULT_WATCHED_FIELDS || 'Chancellor, Vice Chancellor for Academic Affairs, Vice Chancellor for Finance and Administration, Hard copies of admission documents by mail, UgAT requirement, UPCAT requirement, Tuition per unit, Application fee (Filipino undergraduate), Application fee (Foreign undergraduate), Admission inquiries email, Technical support email, Mailing address, 1st Trimester AY 2026-2027 deadline, Admission Section email, Admission Section Contact';
-
 export default function App() {
   const [pipelineState, setPipelineState] = useState<'idle' | 'running' | 'completed' | 'error'>('idle');
   const [currentStep, setCurrentStep] = useState(0);
   const [activeTab, setActiveTab] = useState<'structured' | 'diff' | 'raw'>('structured');
   const [logs, setLogs] = useState<string[]>([]);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [runContext, setRunContext] = useState({ targetCount: 0, fieldCount: 0, pairCount: 0 });
+  const [livePhase, setLivePhase] = useState("Idle");
 
   // Input Settings
-  const [canonicalUrl, setCanonicalUrl] = useState(DEFAULT_CANONICAL_URL);
-  const [targetUrls, setTargetUrls] = useState(DEFAULT_TARGET_URLS);
-  const [fields, setFields] = useState(DEFAULT_WATCHED_FIELDS);
+  const [canonicalUrl, setCanonicalUrl] = useState("http://localhost:4000/api/admissions");
+  const [targetUrls, setTargetUrls] = useState(
+    [
+      "https://www.upou.edu.ph/about/office-of-the-chancellor/",
+      "https://registrar.upou.edu.ph/admission/",
+      "https://registrar.upou.edu.ph/bachelors-program/",
+      "https://our.upou.edu.ph/oas"
+    ].join("\n")
+  );
+  const [fields, setFields] = useState(
+    [
+      "Chancellor",
+      "Vice Chancellor for Academic Affairs",
+      "Vice Chancellor for Finance and Administration",
+      "Hard copies of admission documents by mail",
+      "UgAT requirement",
+      "UPCAT requirement",
+      "Tuition per unit",
+      "Application fee (Filipino undergraduate)",
+      "Application fee (Foreign undergraduate)",
+      "Admission inquiries email",
+      "Technical support email",
+      "Mailing address",
+      "1st Trimester AY 2026-2027 deadline"
+    ].join("\n")
+  );
 
   // Output State
-  const [resultsData, setResultsData] = useState<any>({});
-  const [fieldMatrix, setFieldMatrix] = useState<any>({});
+  const [contractResults, setContractResults] = useState<any[]>([]);
+  const [uiResults, setUiResults] = useState<any[]>([]);
   const [rawDataResult, setRawDataResult] = useState<any[]>([]);
-  const [canonicalMeta, setCanonicalMeta] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [engineUsed, setEngineUsed] = useState("");
+  const [savedScanPath, setSavedScanPath] = useState("");
+  const [canonicalSelected, setCanonicalSelected] = useState("");
+  const [canonicalDatasets, setCanonicalDatasets] = useState<any>(null);
+  const [scanStats, setScanStats] = useState<any>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState("");
   const [aiHealth, setAiHealth] = useState<any>(null);
@@ -44,6 +68,8 @@ export default function App() {
     if (!engine) return "Unknown";
     if (engine === 'Anthropic_Claude') return 'Claude AI';
     if (engine.startsWith('Ollama_')) return `Ollama (${engine.replace('Ollama_', '')})`;
+    if (engine === 'Deterministic_ClaimsFlat') return 'Deterministic (Claims + Flat)';
+    if (engine === 'Local_Regex_Heuristic_Fallback') return 'Local Heuristics (Fallback)';
     if (engine === 'Local_Regex_Heuristic') return 'Local Heuristics';
     return engine;
   };
@@ -52,7 +78,7 @@ export default function App() {
     setHealthLoading(true);
     setHealthError("");
     try {
-      const resp = await fetch(`${CRAWLER_API_BASE}/api/health`);
+      const resp = await fetch('http://localhost:3000/api/health');
       const data = await resp.json();
       if (!resp.ok) {
         setHealthError(data.error || 'Failed to load AI health.');
@@ -60,7 +86,7 @@ export default function App() {
       }
       setAiHealth(data);
     } catch (err: any) {
-      setHealthError(`Cannot reach backend health endpoint at ${CRAWLER_API_BASE}.`);
+      setHealthError("Cannot reach backend health endpoint on port 3000.");
       console.error(err);
     } finally {
       setHealthLoading(false);
@@ -71,78 +97,81 @@ export default function App() {
     loadHealth();
   }, []);
 
+  const parseListInput = (input: string) =>
+    String(input || "")
+      .split(/[\n,]+/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+
   const startScan = async () => {
     if (!canonicalUrl || !targetUrls) return;
     setPipelineState('running');
     setCurrentStep(0);
     setLogs(["Initializing verification pipeline..."]);
+    setElapsedSeconds(0);
+    setLivePhase("Preparing request payload");
     setErrorMsg("");
     setEngineUsed("");
-    setFieldMatrix({});
-    setCanonicalMeta(null);
+    setSavedScanPath("");
+    setContractResults([]);
+    setUiResults([]);
+    setCanonicalSelected("");
+    setCanonicalDatasets(null);
+    setScanStats(null);
 
     // Convert strings to array format for backend
-    const urlsArray = targetUrls.split(',').map((u: string) => u.trim()).filter((u: string) => u);
-    const fieldsArray = fields.split(',').map((f: string) => f.trim()).filter((f: string) => f);
+    const urlsArray = parseListInput(targetUrls);
+    const fieldsArray = parseListInput(fields);
+    const pairCount = urlsArray.length * fieldsArray.length;
+    setRunContext({
+      targetCount: urlsArray.length,
+      fieldCount: fieldsArray.length,
+      pairCount
+    });
 
-    const prettifyFieldKey = (value: string) =>
-      String(value || '')
-        .replace(/_/g, ' ')
-        .replace(/\b\w/g, (c) => c.toUpperCase());
+    const startedAt = Date.now();
+    let lastPhaseIdx = -1;
+    let lastHeartbeatSecond = -30;
+    const phaseTimeline = [
+      { at: 0, step: 0, label: 'Bootstrapping request', message: `Run initialized for ${urlsArray.length} target URL(s), ${fieldsArray.length} watched field(s), ${pairCount} total check units.` },
+      { at: 3, step: 1, label: 'Crawling canonical and target URLs', message: 'Fetching canonical base and crawling target pages for snippet extraction.' },
+      { at: 10, step: 2, label: 'Building canonical candidates', message: 'Resolving claims and flat canonical references per watched field.' },
+      { at: 18, step: 3, label: 'Running field-by-field adjudication', message: 'Applying deterministic checks, then Ollama semantic adjudication when needed.' }
+    ];
+    const progressInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setElapsedSeconds(elapsed);
 
-    const buildFallbackMatrix = (results: any, watchedFields: string[]) => {
-      const matrix: any = {};
-      const resultEntries = Object.entries(results || {});
-
-      if (watchedFields.length > 0) {
-        watchedFields.forEach((field) => {
-          const key = field.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-          const resultField: any = (results || {})[key] || null;
-          matrix[key] = {
-            label: field,
-            canonical: resultField?.canonical || '',
-            type: resultField?.type || 'entity',
-            severity: resultField?.severity || 'low',
-            comparisons: (resultField?.conflicts || []).map((conflict: any) => ({
-              url: conflict.url,
-              found: conflict.found,
-              type: conflict.type,
-              severity: conflict.severity,
-              snippet: conflict.snippet,
-              confidence: conflict.confidence
-            }))
-          };
-        });
-        return matrix;
+      let phaseIdx = 0;
+      for (let i = phaseTimeline.length - 1; i >= 0; i -= 1) {
+        if (elapsed >= phaseTimeline[i].at) {
+          phaseIdx = i;
+          break;
+        }
       }
 
-      resultEntries.forEach(([key, value]: [string, any]) => {
-        matrix[key] = {
-          label: prettifyFieldKey(key),
-          canonical: value?.canonical || '',
-          type: value?.type || 'entity',
-          severity: value?.severity || 'low',
-          comparisons: (value?.conflicts || []).map((conflict: any) => ({
-            url: conflict.url,
-            found: conflict.found,
-            type: conflict.type,
-            severity: conflict.severity,
-            snippet: conflict.snippet,
-            confidence: conflict.confidence
-          }))
-        };
-      });
+      const phase = phaseTimeline[phaseIdx];
+      setCurrentStep(phase.step);
+      setLivePhase(phase.label);
 
-      return matrix;
-    };
+      if (phaseIdx !== lastPhaseIdx) {
+        lastPhaseIdx = phaseIdx;
+        const ts = new Date().toISOString().split('T')[1].slice(0, 8);
+        setLogs(prev => [...prev, `[${ts}] ${phase.message}`]);
+      }
 
-    // Simulated async logs for UI feedback while waiting for real backend
-    const logInterval = setInterval(() => {
-      setCurrentStep(s => (s < 3 ? s + 1 : s));
-    }, 4000); // Progress the UI visually every 4 seconds
+      if (elapsed - lastHeartbeatSecond >= 30) {
+        lastHeartbeatSecond = elapsed;
+        const ts = new Date().toISOString().split('T')[1].slice(0, 8);
+        setLogs(prev => [
+          ...prev,
+          `[${ts}] Still running. Completed stages may pause while waiting for model output. Elapsed ${elapsed}s.`
+        ]);
+      }
+    }, 1000);
 
     try {
-      const resp = await fetch(`${CRAWLER_API_BASE}/api/scan`, {
+      const resp = await fetch('http://localhost:3000/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -152,7 +181,7 @@ export default function App() {
         })
       });
 
-      clearInterval(logInterval);
+      clearInterval(progressInterval);
       const data = await resp.json();
 
       if (!resp.ok) {
@@ -161,29 +190,25 @@ export default function App() {
         return;
       }
 
-      const backendWatchedFields = Array.isArray(data.watched_fields) ? data.watched_fields : fieldsArray;
-      const resolvedFieldMatrix = data.field_matrix && Object.keys(data.field_matrix).length > 0
-        ? data.field_matrix
-        : buildFallbackMatrix(data.results, backendWatchedFields);
-
-      if (!fieldsArray.length && backendWatchedFields.length > 0) {
-        setFields(backendWatchedFields.join(', '));
-      }
-
-      setResultsData(data.results || {});
-      setFieldMatrix(resolvedFieldMatrix);
+      setContractResults(Array.isArray(data.results) ? data.results : []);
+      setUiResults(Array.isArray(data.ui_results) ? data.ui_results : []);
       setRawDataResult(data.raw_data);
-      setCanonicalMeta(data.canonical_meta || null);
       setEngineUsed(data.engine_used);
+      setSavedScanPath(data.saved_scan_path || "");
+      setCanonicalSelected(data.canonical_selected || "");
+      setCanonicalDatasets(data.canonical_datasets || null);
+      setScanStats(data.stats || null);
       loadHealth();
       setCurrentStep(4);
+      setLivePhase("Completed");
       setPipelineState('completed');
       setLogs(prev => [...prev, `[${new Date().toISOString().split('T')[1].slice(0, 8)}] Scan complete using ${engineLabel(data.engine_used)}.`]);
 
     } catch (err: any) {
-      clearInterval(logInterval);
+      clearInterval(progressInterval);
       setPipelineState('error');
-      setErrorMsg(`Network error connecting to ${CRAWLER_API_BASE}. Is the backend running?`);
+      setLivePhase("Failed");
+      setErrorMsg("Network error trying to connect to backend on port 3000. Is the server running?");
       console.error(err);
     }
   };
@@ -201,10 +226,9 @@ export default function App() {
   const getMatchTypeBadge = (type: string) => {
     if (!type) return null;
     switch (type.toLowerCase()) {
-      case 'exact_match': return <span className="badge" style={{ background: 'rgba(129, 199, 132, 0.12)', color: '#81c784', border: '1px solid rgba(129, 199, 132, 0.35)' }}>Exact Match</span>;
-      case 'mismatch': return <span className="badge" style={{ background: 'rgba(255, 75, 75, 0.1)', color: '#ff4b4b', border: '1px solid rgba(255, 75, 75, 0.3)' }}>Mismatch</span>;
+      case 'match': return <span className="badge" style={{ background: 'rgba(61, 220, 151, 0.12)', color: '#35d089', border: '1px solid rgba(61, 220, 151, 0.35)' }}>Match</span>;
       case 'fuzzy_match': return <span className="badge" style={{ background: 'rgba(251, 192, 45, 0.1)', color: '#fbc02d', border: '1px solid rgba(251, 192, 45, 0.3)' }}>Fuzzy Match</span>;
-      case 'not_found': return <span className="badge" style={{ background: 'rgba(144, 164, 174, 0.12)', color: '#b0bec5', border: '1px solid rgba(144, 164, 174, 0.35)' }}>Not Found</span>;
+      case 'no_match': return <span className="badge" style={{ background: 'rgba(255, 152, 0, 0.1)', color: '#ff9800', border: '1px solid rgba(255, 152, 0, 0.3)' }}>No Match</span>;
       default: return <span className="badge">Unknown</span>;
     }
   };
@@ -214,13 +238,6 @@ export default function App() {
       {ok ? textTrue : textFalse}
     </span>
   );
-
-  const formatIsoDate = (value?: string | null) => {
-    if (!value) return 'Not available';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return 'Not available';
-    return date.toLocaleString();
-  };
 
   const renderHealthPanel = () => (
     <div className="glass-card" style={{ padding: '1.25rem' }}>
@@ -308,7 +325,7 @@ export default function App() {
             <div style={{ textAlign: 'center', marginBottom: '3rem' }}>
               <h1 className="page-title">Dynamic Content Checker Pipeline</h1>
               <p className="page-subtitle" style={{ margin: '0 auto' }}>
-                Run semantic factual difference detection using Anthropic Claude. Automatically extracts raw content across unaligned structures and clusters knowledge.
+                Run field-by-field consistency checks with claims-first matching and flat canonical fallback, then semantic adjudication via Ollama when needed.
               </p>
             </div>
 
@@ -370,26 +387,45 @@ export default function App() {
                 </h3>
 
                 <div style={{ paddingLeft: '1rem' }}>
-                  <div className={"pipeline-step " + (currentStep >= 1 ? "completed" : currentStep === 0 ? "active" : "")}>
-                    <div className="step-icon"><Search size={18} /></div>
-                    <div className="step-content">
-                      <div className="step-title">1. Raw Text Extraction</div>
-                      <div className="step-desc">Fetching URLs across subdomains and stripping the DOM structure.</div>
+                    <div className={"pipeline-step " + (currentStep >= 1 ? "completed" : currentStep === 0 ? "active" : "")}>
+                      <div className="step-icon"><Search size={18} /></div>
+                      <div className="step-content">
+                      <div className="step-title">1. Crawl and Normalize Sources</div>
+                      <div className="step-desc">Fetch canonical + target URLs and extract clean snippet blocks.</div>
+                      </div>
+                    </div>
+                    <div className={"pipeline-step " + (currentStep >= 2 ? "completed" : currentStep === 1 ? "active" : "")}>
+                      <div className="step-icon"><Split size={18} /></div>
+                      <div className="step-content">
+                      <div className="step-title">2. Canonical Candidate Mapping</div>
+                      <div className="step-desc">Resolve top claims and flat canon candidates per watched field.</div>
+                      </div>
+                    </div>
+                    <div className={"pipeline-step " + (currentStep >= 3 ? "completed" : currentStep === 2 ? "active" : "")}>
+                      <div className="step-icon"><Cpu size={18} /></div>
+                      <div className="step-content">
+                      <div className="step-title">3. Field-by-Field Adjudication</div>
+                      <div className="step-desc">Deterministic matching first, then Ollama semantic checks for uncertain pairs.</div>
+                      </div>
                     </div>
                   </div>
-                  <div className={"pipeline-step " + (currentStep >= 2 ? "completed" : currentStep === 1 ? "active" : "")}>
-                    <div className="step-icon"><Split size={18} /></div>
-                    <div className="step-content">
-                      <div className="step-title">2. Context Chunking</div>
-                      <div className="step-desc">Cleaning text constraints and normalizing content density.</div>
-                    </div>
+
+                <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '0.6rem' }}>
+                  <div style={{ padding: '0.6rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Phase</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{livePhase}</div>
                   </div>
-                  <div className={"pipeline-step " + (currentStep >= 3 ? "completed" : currentStep === 2 ? "active" : "")}>
-                    <div className="step-icon"><Cpu size={18} /></div>
-                    <div className="step-content">
-                      <div className="step-title">3. Multi-prompt Fact Resolution via AI</div>
-                      <div className="step-desc">LLM actively reconciling unstructured dumps against the watched schema vectors.</div>
-                    </div>
+                  <div style={{ padding: '0.6rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Elapsed</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{elapsedSeconds}s</div>
+                  </div>
+                  <div style={{ padding: '0.6rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Targets / Fields</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{runContext.targetCount} / {runContext.fieldCount}</div>
+                  </div>
+                  <div style={{ padding: '0.6rem', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Check Units</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{runContext.pairCount}</div>
                   </div>
                 </div>
 
@@ -398,7 +434,7 @@ export default function App() {
                     <div key={i} className="log-line animate-fade-in">{log}</div>
                   ))}
                   <div className="log-line log-info animate-fade-in" style={{ animationDelay: '0.5s' }}>
-                    <span className="pulse">Processing HTTP requests and reading AI stream...</span>
+                    <span className="pulse">Running comparison pipeline. Semantic stages can take several minutes for large runs.</span>
                   </div>
                 </div>
               </div>
@@ -432,34 +468,60 @@ export default function App() {
 
             <div className="stats-grid">
               <div className="glass-card stat-card" style={{ borderTop: '3px solid var(--status-critical)' }}>
-                <span className="stat-label">Inconsistent Fields</span>
-                <span className="stat-value">{Object.keys(resultsData).length} <span style={{ fontSize: '1rem', color: 'var(--text-muted)', fontWeight: 400 }}>flagged</span></span>
+                <span className="stat-label">Non-Match Findings</span>
+                <span className="stat-value">
+                  {uiResults.filter((row: any) => row.status !== 'match').length}
+                  <span style={{ fontSize: '1rem', color: 'var(--text-muted)', fontWeight: 400 }}> rows</span>
+                </span>
               </div>
               <div className="glass-card stat-card" style={{ borderTop: '3px solid var(--accent-primary)' }}>
-                <span className="stat-label">Tracked Fields</span>
-                <span className="stat-value">{Object.keys(fieldMatrix).length} <span style={{ fontSize: '1rem', color: 'var(--text-muted)', fontWeight: 400 }}>total</span></span>
+                <span className="stat-label">Total URLs Scraped</span>
+                <span className="stat-value">{rawDataResult.length} <span style={{ fontSize: '1rem', color: 'var(--text-muted)', fontWeight: 400 }}>domains</span></span>
               </div>
               <div className="glass-card stat-card" style={{ borderTop: '3px solid var(--status-low)' }}>
                 <span className="stat-label">Engine Used</span>
                 <span className="stat-value" style={{ fontSize: '1.3rem' }}>{engineLabel(engineUsed)}</span>
               </div>
               <div className="glass-card stat-card" style={{ borderTop: '3px solid var(--status-medium)' }}>
-                <span className="stat-label">Canonical Version</span>
-                <span className="stat-value" style={{ fontSize: '1rem' }}>{canonicalMeta?.version || 'Unavailable'}</span>
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  Reviewed: {formatIsoDate(canonicalMeta?.lastReviewedAt)}
+                <span className="stat-label">Overall Consistency</span>
+                <span className="stat-value">
+                  {typeof scanStats?.overall_consistency_score === 'number'
+                    ? `${(Number(scanStats.overall_consistency_score) * 100).toFixed(0)}%`
+                    : '—'}
                 </span>
               </div>
             </div>
 
-            <div className="glass-card" style={{ marginBottom: '1rem', padding: '1rem' }}>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Canonical Source</div>
-              <div style={{ fontWeight: 600, marginTop: '0.25rem' }}>{canonicalMeta?.title || canonicalUrl}</div>
-              <div style={{ marginTop: '0.35rem', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                Source: <strong>{canonicalMeta?.source || 'web_page'}</strong>
-                {' '}| URL: <strong>{canonicalMeta?.url || canonicalUrl}</strong>
+            {(savedScanPath || canonicalSelected || canonicalDatasets) && (
+              <div className="glass-card" style={{ marginBottom: '1rem', padding: '1rem 1.25rem' }}>
+                {savedScanPath && (
+                  <div style={{ fontSize: '0.9rem', marginBottom: canonicalDatasets ? '0.75rem' : 0 }}>
+                    <strong>Saved Scan:</strong> <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{savedScanPath}</span>
+                  </div>
+                )}
+                {canonicalSelected && (
+                  <div style={{ fontSize: '0.9rem', marginBottom: canonicalDatasets ? '0.75rem' : 0 }}>
+                    <strong>Canonical Base URL:</strong> <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{canonicalSelected}</span>
+                  </div>
+                )}
+                {canonicalDatasets && (
+                  <div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Canonical dataset endpoints and fallback sources</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        Claims API: <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{canonicalDatasets.claims_url}</span> ({canonicalDatasets.claims_source}, count: {canonicalDatasets.claims_count})
+                      </div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        Flat API: <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{canonicalDatasets.flat_url}</span> ({canonicalDatasets.flat_source}, count: {canonicalDatasets.flat_entries_count})
+                      </div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        Snapshot API: <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{canonicalDatasets.snapshot_url}</span> ({canonicalDatasets.snapshot_source})
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
             {renderHealthPanel()}
 
@@ -467,61 +529,57 @@ export default function App() {
               {activeTab === 'structured' && (
                 <div className="animate-fade-in">
                   <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.2)' }}>
-                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>All Watched Fields Across All Sites</h3>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Human-readable matrix of exact matches, fuzzy matches, mismatches, and missing values per target site.</p>
+                    <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Post-Hoc Inconsistencies Extracted</h3>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>
+                      These findings were automatically clustered and extracted by the matcher. Contract rows returned: {contractResults.length}.
+                    </p>
                   </div>
 
-                  {Object.keys(fieldMatrix).length === 0 ? (
+                  {uiResults.length === 0 ? (
                     <div style={{ padding: '4rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                      No field matrix available. Try re-running with valid watched fields and reachable URLs.
+                      No specific variations were flagged or the AI produced a generalized output. Try adjusting search criteria fields.
                     </div>
                   ) : (
                     <table className="data-table">
                       <thead>
                         <tr>
                           <th>Watched Field</th>
-                          <th>Canonical Truth Anchor</th>
-                          <th>Type / Severity</th>
-                          <th>Per-Site Results</th>
+                          <th>Target URL</th>
+                          <th>Canonical Source</th>
+                          <th>Found Value</th>
+                          <th>Status</th>
+                          <th>Match Severity</th>
+                          <th>AI Confidence</th>
+                          <th>Reason</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(fieldMatrix).map(([field, data]: [string, any]) => (
-                          <tr key={field}>
-                            <td>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{data.label || field}</span>
-                              </div>
-                            </td>
-                            <td style={{ fontWeight: 500 }}>{data.canonical || <span style={{ color: 'var(--text-muted)' }}>Not found in canonical source</span>}</td>
-                            <td>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                                <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.05)', padding: '0.1rem 0.4rem', borderRadius: '4px', color: 'var(--text-muted)', width: 'fit-content' }}>{data.type}</span>
-                                <div>{getSeverityBadge(data.severity)}</div>
-                              </div>
-                            </td>
-                            <td>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-                                {(data.comparisons || []).map((c: any, i: number) => {
-                                  let hostname = "unknown";
-                                  try { hostname = new URL(c.url).hostname; } catch (e) {}
-                                  return (
-                                    <div key={i} style={{ borderLeft: '2px solid var(--border-color)', paddingLeft: '0.75rem' }}>
-                                      <a href={c.url} target="_blank" rel="noreferrer" style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.25rem', marginBottom: '0.35rem' }}>
-                                        {hostname}
-                                        <ExternalLink size={12} />
-                                      </a>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        {getMatchTypeBadge(c.type)}
-                                        <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>{c.found || <span style={{ color: 'var(--text-muted)' }}>No value extracted</span>}</span>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                        {uiResults.map((row: any, idx: number) => {
+                          let hostname = "unknown";
+                          try { hostname = new URL(row.target_url).hostname; } catch (e) { }
+                          return (
+                            <tr key={`${row.watched_field}-${row.target_url}-${idx}`}>
+                              <td>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                                  <span style={{ fontFamily: 'monospace', color: 'var(--accent-secondary)' }}>{row.watched_field}</span>
+                                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{row.canonical_ref || 'No canonical ref'}</span>
+                                </div>
+                              </td>
+                              <td>
+                                <a href={row.target_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                  {hostname}
+                                  <ExternalLink size={12} />
+                                </a>
+                              </td>
+                              <td style={{ maxWidth: '260px' }}>{row.canonical_source || '—'}</td>
+                              <td style={{ maxWidth: '260px' }}>{row.found_value || '—'}</td>
+                              <td>{getMatchTypeBadge(row.status)}</td>
+                              <td>{getSeverityBadge(row.match_severity)}</td>
+                              <td>{typeof row.confidence === 'number' ? `${(Number(row.confidence) * 100).toFixed(0)}%` : '—'}</td>
+                              <td style={{ maxWidth: '280px' }}>{row.reason || '—'}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   )}
@@ -535,62 +593,60 @@ export default function App() {
                     <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Canonical truth vs found data mapped side by side from the AI's contextual interpretation.</p>
                   </div>
 
-                  {Object.keys(fieldMatrix).length === 0 ? (
+                  {uiResults.length === 0 ? (
                     <div style={{ padding: '4rem', textAlign: 'center', color: 'var(--text-muted)' }}>No Diffable Conflicts Flagged.</div>
                   ) : null}
 
-                  {Object.entries(fieldMatrix).map(([field, data]: [string, any]) => (
-                    (data.comparisons || []).map((conflict: any, i: number) => {
-                      let canonicalHost = "canonical";
-                      let conflictHost = "target";
-                      try { canonicalHost = new URL(rawDataResult[0]?.url).hostname; } catch (e) { }
-                      try { conflictHost = new URL(conflict.url).hostname; } catch (e) { }
+                  {uiResults.map((row: any, i: number) => {
+                    let canonicalHost = "canonical";
+                    let conflictHost = "target";
+                    try { canonicalHost = new URL(canonicalSelected || rawDataResult[0]?.url).hostname; } catch (e) { }
+                    try { conflictHost = new URL(row.target_url).hostname; } catch (e) { }
 
-                      return (
-                        <div key={`${field}-${i}`} className="item-row">
-                          <div className="item-meta">
-                            <div className="item-field-name">{(data.label || field).toUpperCase()}</div>
-                            <div style={{ marginTop: '0.5rem' }}>{getSeverityBadge(data.severity)}</div>
-                            <div style={{ marginTop: '0.25rem' }}>{getMatchTypeBadge(conflict.type)}</div>
-                            {conflict.confidence && (
-                              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                                <CheckCircle2 size={12} style={{ color: 'var(--status-low)' }} />
-                                AI Confidence: {(Number(conflict.confidence) * 100).toFixed(0)}%
-                              </div>
-                            )}
+                    return (
+                      <div key={`${row.watched_field}-${i}`} className="item-row">
+                        <div className="item-meta">
+                          <div className="item-field-name">{String(row.watched_field || '').toUpperCase()}</div>
+                          <div style={{ marginTop: '0.5rem' }}>{getSeverityBadge(row.match_severity)}</div>
+                          <div style={{ marginTop: '0.25rem' }}>{getMatchTypeBadge(row.status)}</div>
+                          {typeof row.confidence === 'number' && (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                              <CheckCircle2 size={12} style={{ color: 'var(--status-low)' }} />
+                              AI Confidence: {(Number(row.confidence) * 100).toFixed(0)}%
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="diff-grid">
+                          <div className="diff-box">
+                            <div className="diff-box-header">
+                              <span>Canonical Truth</span>
+                              <span className="diff-source">{canonicalHost}</span>
+                            </div>
+                            <div className="diff-content" style={{ marginTop: '1rem', fontSize: '1.2rem', fontWeight: 600 }}>
+                              <span className="highlight-add">{row.canonical_source || '—'}</span>
+                            </div>
                           </div>
 
-                          <div className="diff-grid">
-                            <div className="diff-box">
-                              <div className="diff-box-header">
-                                <span>Canonical Truth</span>
-                                <span className="diff-source">{canonicalHost}</span>
-                              </div>
-                              <div className="diff-content" style={{ marginTop: '1rem', fontSize: '1.2rem', fontWeight: 600 }}>
-                                <span className="highlight-add">{data.canonical || 'No canonical extraction available'}</span>
-                              </div>
+                          <div className="diff-box">
+                            <div className="diff-box-header">
+                              <span>Found Value in Wild</span>
+                              <span className="diff-source" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '150px' }} title={row.target_url}>{conflictHost}</span>
                             </div>
-
-                            <div className="diff-box">
-                              <div className="diff-box-header">
-                                <span>Found Value in Wild</span>
-                                <span className="diff-source" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '150px' }} title={conflict.url}>{conflictHost}</span>
-                              </div>
-                              <div className="diff-content" style={{ marginTop: '1rem', fontSize: '1.2rem', fontWeight: 600 }}>
-                                <span className="highlight-remove">{conflict.found || 'No value extracted'}</span>
-                              </div>
-                              <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px dashed var(--border-color)' }}>
-                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Extracted Context Snippet</div>
-                                <div style={{ fontSize: '0.9rem', fontStyle: 'italic', color: 'var(--text-primary)' }}>
-                                  "{conflict.snippet || 'No snippet available.'}"
-                                </div>
+                            <div className="diff-content" style={{ marginTop: '1rem', fontSize: '1.2rem', fontWeight: 600 }}>
+                              <span className="highlight-remove">{row.found_value || '—'}</span>
+                            </div>
+                            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px dashed var(--border-color)' }}>
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Reason</div>
+                              <div style={{ fontSize: '0.9rem', fontStyle: 'italic', color: 'var(--text-primary)' }}>
+                                "{row.reason || 'No reason provided.'}"
                               </div>
                             </div>
                           </div>
                         </div>
-                      )
-                    })
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -598,7 +654,7 @@ export default function App() {
                 <div className="animate-fade-in" style={{ padding: '2rem' }}>
                   <div style={{ marginBottom: '2rem' }}>
                     <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Unstructured Crawl Payload</h3>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>The exact raw text array dumped out to Anthropic's context window. (Scraped locally via Node.js Cheerio).</p>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Raw extracted text used by deterministic and semantic matching stages (scraped locally via Node.js Cheerio).</p>
                   </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
